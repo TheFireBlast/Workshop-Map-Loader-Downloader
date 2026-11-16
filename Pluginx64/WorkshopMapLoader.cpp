@@ -56,6 +56,12 @@ namespace
 	}
 }
 
+// Where downscaled preview thumbnails are cached (see Utils::GetThumbnail)
+std::filesystem::path ThumbnailCachePath()
+{
+	return std::filesystem::path(g_pluginConfig.BakkesmodPath) / "data" / "WorkshopMapLoader" / "thumbs";
+}
+
 void Pluginx64::onLoad()
 {
 	// BakkesMod decodes PNG/JPG images with DirectXTex, which creates its WIC factory with CoCreateInstance on
@@ -146,9 +152,23 @@ std::vector<std::string> Pluginx64::GetJSONLocalMapInfos(std::string jsonFilePat
 	std::string MapDescription = actualJson["Description"].asString();
 	std::string MapAuthor = actualJson["Author"].asString();
 
-	MapTitle.erase(std::remove(MapTitle.begin(), MapTitle.end(), '\n'), MapTitle.end()); //remove newlines
-	MapDescription.erase(std::remove(MapDescription.begin(), MapDescription.end(), '\n'), MapDescription.end()); //remove newlines
-	MapAuthor.erase(std::remove(MapAuthor.begin(), MapAuthor.end(), '\n'), MapAuthor.end()); //remove newlines
+	// Descriptions copied from map sites often contain HTML (<br>, <b>, &amp;): show them as plain, single-line text
+	auto toSingleLine = [](std::string p_value)
+	{
+		p_value = Utils::HTMLToText(p_value);
+		std::replace(p_value.begin(), p_value.end(), '\n', ' ');
+		std::replace(p_value.begin(), p_value.end(), '\r', ' ');
+		std::string collapsed;
+		for (char character : p_value)
+			if (character != ' ' || (!collapsed.empty() && collapsed.back() != ' '))
+				collapsed += character;
+		while (!collapsed.empty() && collapsed.back() == ' ')
+			collapsed.pop_back();
+		return collapsed;
+	};
+	MapTitle = toSingleLine(MapTitle);
+	MapDescription = toSingleLine(MapDescription);
+	MapAuthor = toSingleLine(MapAuthor);
 
 	Infos.push_back(MapTitle);
 	Infos.push_back(MapDescription);
@@ -235,7 +255,7 @@ void Pluginx64::RefreshMapsFunct(std::string mapsfolders)
 
 				if ((!hasFoundPreview && fileExtension == ".png") || (!hasFoundPreview && fileExtension == ".jpg") || (!hasFoundPreview && fileExtension == ".jfif"))
 				{
-					map.PreviewImage = std::make_shared<ImageWrapper>(file.path(), false, true);
+					map.PreviewImage = std::make_shared<ImageWrapper>(Utils::GetThumbnail(file.path(), ThumbnailCachePath(), 320, 180), false, true);
 					map.isPreviewImageLoaded = true;
 					cvarManager->log("Preview Loaded : " + file.path().string());
 					hasFoundPreview = true;
@@ -244,7 +264,7 @@ void Pluginx64::RefreshMapsFunct(std::string mapsfolders)
 				{
 					if (nbFiles == nbFilesInDirectory && hasFoundPreview == false)
 					{
-						map.PreviewImage = std::make_shared<ImageWrapper>(IfNoPreviewImagePath, false, true); //if there is no preview image, it will load a red cross image
+						map.PreviewImage = std::make_shared<ImageWrapper>(Utils::GetThumbnail(IfNoPreviewImagePath, ThumbnailCachePath(), 320, 180), false, true); //if there is no preview image, it will load a red cross image
 						map.isPreviewImageLoaded = true;
 						cvarManager->log("No preview found in this folder");
 					}
@@ -287,7 +307,7 @@ void Pluginx64::RefreshMapsFunct(std::string mapsfolders)
 			map.UpkFile = "EmptyFolder";
 			map.ZipFile = "EmptyFolder";
 			map.JsonFile = "EmptyFolder";
-			map.PreviewImage = std::make_shared<ImageWrapper>(IfNoPreviewImagePath, false, true); //if there is no preview image, it will load a red cross image
+			map.PreviewImage = std::make_shared<ImageWrapper>(Utils::GetThumbnail(IfNoPreviewImagePath, ThumbnailCachePath(), 320, 180), false, true); //if there is no preview image, it will load a red cross image
 			map.isPreviewImageLoaded = true;
 		}
 

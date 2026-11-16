@@ -1,5 +1,7 @@
 #include "pch.h"
 #include <zlib.h>
+#include <wincodec.h>
+#pragma comment(lib, "windowscodecs.lib")
 
 namespace Utils
 {
@@ -339,6 +341,139 @@ namespace Utils
 		batchFile << "cscript //nologo %vbs%\nif exist %vbs% del /f /q %vbs%\n";
 		batchFile.close();
 		system(batchPath.string().c_str());
+	}
+
+	namespace
+	{
+		template <typename T> void ReleaseCom(T*& p_object) { if (p_object) { p_object->Release(); p_object = nullptr; } }
+
+		// Decodes any WIC-supported image to 32bpp BGRA
+		bool DecodeImageBGRA(const std::filesystem::path& p_path, std::vector<unsigned char>& p_pixels, UINT& p_width, UINT& p_height)
+		{
+			IWICImagingFactory* factory = nullptr;
+			IWICBitmapDecoder* decoder = nullptr;
+			IWICBitmapFrameDecode* frame = nullptr;
+			IWICFormatConverter* converter = nullptr;
+			bool ok = false;
+			if (SUCCEEDED(CoCreateInstance(CLSID_WICImagingFactory, nullptr, CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory))) &&
+				SUCCEEDED(factory->CreateDecoderFromFilename(p_path.wstring().c_str(), nullptr, GENERIC_READ, WICDecodeMetadataCacheOnDemand, &decoder)) &&
+				SUCCEEDED(decoder->GetFrame(0, &frame)) &&
+				SUCCEEDED(frame->GetSize(&p_width, &p_height)) && p_width > 0 && p_height > 0 &&
+				SUCCEEDED(factory->CreateFormatConverter(&converter)) &&
+				SUCCEEDED(converter->Initialize(frame, GUID_WICPixelFormat32bppBGRA, WICBitmapDitherTypeNone, nullptr, 0.0, WICBitmapPaletteTypeCustom)))
+			{
+				p_pixels.resize(static_cast<size_t>(p_width) * p_height * 4);
+				ok = SUCCEEDED(converter->CopyPixels(nullptr, p_width * 4, static_cast<UINT>(p_pixels.size()), p_pixels.data()));
+			}
+			ReleaseCom(converter);
+			ReleaseCom(frame);
+			ReleaseCom(decoder);
+			ReleaseCom(factory);
+			return ok;
+		}
+
+		// Area-averaging downscale (each destination pixel is the mean of the source pixels it covers)
+		std::vector<unsigned char> BoxDownscaleBGRA(const std::vector<unsigned char>& p_source, UINT p_sourceWidth, UINT p_sourceHeight,
+			UINT p_width, UINT p_height)
+		{
+			std::vector<unsigned char> result(static_cast<size_t>(p_width) * p_height * 4);
+			for (UINT y = 0; y < p_height; y++)
+			{
+				const UINT y0 = static_cast<UINT>(static_cast<unsigned long long>(y) * p_sourceHeight / p_height);
+				UINT y1 = static_cast<UINT>(static_cast<unsigned long long>(y + 1) * p_sourceHeight / p_height);
+				if (y1 <= y0) y1 = y0 + 1;
+				for (UINT x = 0; x < p_width; x++)
+				{
+					const UINT x0 = static_cast<UINT>(static_cast<unsigned long long>(x) * p_sourceWidth / p_width);
+					UINT x1 = static_cast<UINT>(static_cast<unsigned long long>(x + 1) * p_sourceWidth / p_width);
+					if (x1 <= x0) x1 = x0 + 1;
+					unsigned long long sum[4] = {};
+					for (UINT sy = y0; sy < y1; sy++)
+					{
+						const unsigned char* row = &p_source[(static_cast<size_t>(sy) * p_sourceWidth + x0) * 4];
+						for (UINT sx = x0; sx < x1; sx++, row += 4)
+							for (int c = 0; c < 4; c++)
+								sum[c] += row[c];
+					}
+					const unsigned long long count = static_cast<unsigned long long>(y1 - y0) * (x1 - x0);
+					unsigned char* out = &result[(static_cast<size_t>(y) * p_width + x) * 4];
+					for (int c = 0; c < 4; c++)
+						out[c] = static_cast<unsigned char>((sum[c] + count / 2) / count);
+				}
+			}
+			return result;
+		}
+
+		// Writes a 24-bit bottom-up BMP (no alpha needed for previews; every WIC build reads it)
+		bool WriteBMP24(const std::filesystem::path& p_path, const std::vector<unsigned char>& p_bgra, UINT p_width, UINT p_height)
+		{
+			const UINT rowSize = (p_width * 3 + 3) & ~3u;
+			const UINT imageSize = rowSize * p_height;
+			unsigned char header[54] = { 'B', 'M' };
+			auto put32 = [&](int p_offset, UINT p_value) { for (int i = 0; i < 4; i++) header[p_offset + i] = static_cast<unsigned char>(p_value >> (8 * i)); };
+			put32(2, 54 + imageSize);
+			put32(10, 54);
+			put32(14, 40);
+			put32(18, p_width);
+			put32(22, p_height);
+			header[26] = 1;
+			header[28] = 24;
+			put32(34, imageSize);
+			std::ofstream file(p_path, std::ios::binary | std::ios::trunc);
+			if (!file)
+				return false;
+			file.write(reinterpret_cast<const char*>(header), sizeof(header));
+			std::vector<unsigned char> row(rowSize, 0);
+			for (UINT y = 0; y < p_height; y++)
+			{
+				const unsigned char* source = &p_bgra[static_cast<size_t>(p_height - 1 - y) * p_width * 4];
+				for (UINT x = 0; x < p_width; x++)
+				{
+					row[x * 3 + 0] = source[x * 4 + 0];
+					row[x * 3 + 1] = source[x * 4 + 1];
+					row[x * 3 + 2] = source[x * 4 + 2];
+				}
+				file.write(reinterpret_cast<const char*>(row.data()), rowSize);
+			}
+			return static_cast<bool>(file);
+		}
+	}
+
+	std::filesystem::path GetThumbnail(const std::filesystem::path& p_image, const std::filesystem::path& p_cacheDirectory,
+		int p_coverWidth, int p_coverHeight)
+	{
+		std::error_code error;
+		const auto fileSize = std::filesystem::file_size(p_image, error);
+		if (error)
+			return p_image;
+		const auto modified = std::filesystem::last_write_time(p_image, error).time_since_epoch().count();
+		if (error)
+			return p_image;
+
+		const std::string key = std::to_string(std::hash<std::wstring>{}(p_image.wstring())) + "_" +
+			std::to_string(fileSize) + "_" + std::to_string(modified) + "_" + std::to_string(p_coverWidth) + "x" + std::to_string(p_coverHeight);
+		const std::filesystem::path thumbnail = p_cacheDirectory / (key + ".bmp");
+		if (std::filesystem::exists(thumbnail, error))
+			return thumbnail;
+
+		std::vector<unsigned char> pixels;
+		UINT width = 0, height = 0;
+		if (!DecodeImageBGRA(p_image, pixels, width, height))
+			return p_image;
+
+		// Scale so the image covers the target box; keep the whole image (drawing code crops by UV)
+		const double scale = (std::max)(static_cast<double>(p_coverWidth) / width, static_cast<double>(p_coverHeight) / height);
+		if (scale >= 0.75) // already close to display size: bilinear sampling is fine
+			return p_image;
+		const UINT newWidth = (std::max)(1u, static_cast<UINT>(width * scale + 0.5));
+		const UINT newHeight = (std::max)(1u, static_cast<UINT>(height * scale + 0.5));
+
+		std::filesystem::create_directories(p_cacheDirectory, error);
+		const std::filesystem::path temporary = p_cacheDirectory / (key + ".tmp");
+		if (!WriteBMP24(temporary, BoxDownscaleBGRA(pixels, width, height, newWidth, newHeight), newWidth, newHeight))
+			return p_image;
+		std::filesystem::rename(temporary, thumbnail, error);
+		return error ? p_image : thumbnail;
 	}
 
 	void AddImageCover(ImDrawList* p_drawList, ImageWrapper& p_image, const ImVec2& p_min, const ImVec2& p_max)

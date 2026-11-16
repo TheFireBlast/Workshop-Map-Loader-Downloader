@@ -648,6 +648,14 @@ BakkesPluginsMapInstaller::~BakkesPluginsMapInstaller()
 	Shutdown();
 }
 
+namespace Utils
+{
+	std::string HTMLToText(const std::string& p_html)
+	{
+		return CleanHTMLText(p_html);
+	}
+}
+
 void BakkesPluginsMapInstaller::Initialize(std::shared_ptr<CVarManagerWrapper> p_cvarManager)
 {
 	m_cvarManager = p_cvarManager;
@@ -684,7 +692,7 @@ void BakkesPluginsMapInstaller::Render()
 
 	static std::string bakkesPluginsMapsURL = "https://bakkesplugins.com/maps";
 	if(m_previewReady.exchange(false) && !previewCachePath.empty())
-		m_previewImage = std::make_shared<ImageWrapper>(previewCachePath.string(), false, true);
+		m_previewImage = std::make_shared<ImageWrapper>(Utils::GetThumbnail(previewCachePath, std::filesystem::path(g_pluginConfig.BakkesmodPath) / "data" / "WorkshopMapLoader" / "thumbs", 640, 360), false, true);
 
 	if(m_previewImage && m_previewImage->GetImGuiTex() && !previewCachePath.empty())
 	{

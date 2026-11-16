@@ -5,9 +5,17 @@ namespace Utils
 	std::wstring StringToWideString(const std::string& p_value);
 	std::string ConvertToMB(const std::string& p_value);
 	bool DirectoryOrFileExists(const std::filesystem::path& p_path, std::filesystem::file_status p_status = std::filesystem::file_status{});
+	// Converts an HTML fragment (<br>, <b>, entities, ...) to plain text. Defined in BakkesPluginsMapInstaller.cpp.
+	std::string HTMLToText(const std::string& p_html);
 	// Extracts p_zipPath into p_destination in-process (zlib). Returns false and sets p_error on failure.
 	bool ExtractZip(const std::filesystem::path& p_zipPath, const std::filesystem::path& p_destination, std::string& p_error);
 	void CreateUnzipBatchFile(const std::filesystem::path& p_bakkesmodPath, const std::string& p_destinationPath, const std::string& p_zipFilePath);
+	// Returns a cached copy of p_image shrunk with a box filter so it covers p_coverWidth x p_coverHeight
+	// (aspect ratio kept, nothing cropped). BakkesMod's ImGui samples textures without mipmaps, so drawing a
+	// large image small aliases badly; drawing this thumbnail instead keeps edges smooth.
+	// Falls back to p_image itself when it is already small or cannot be decoded.
+	std::filesystem::path GetThumbnail(const std::filesystem::path& p_image, const std::filesystem::path& p_cacheDirectory,
+		int p_coverWidth, int p_coverHeight);
 	// Draws p_image filling [p_min, p_max] without stretching: the image is scaled to cover the box and
 	// the overflow is cropped equally on both sides.
 	void AddImageCover(ImDrawList* p_drawList, ImageWrapper& p_image, const ImVec2& p_min, const ImVec2& p_max);
