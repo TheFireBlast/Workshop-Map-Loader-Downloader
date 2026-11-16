@@ -36,6 +36,10 @@ public:
 	virtual void onLoad();
 	virtual void onUnload();
 
+	// Keeps a process-wide COM MTA alive so BakkesMod can load images under Wine (see onLoad)
+	CO_MTA_USAGE_COOKIE m_mtaUsageCookie = nullptr;
+
+
 	//Custom Game
 	int nbPlayers = 6; //choose number of players in the server
 	std::string getMutatorsCommandString();

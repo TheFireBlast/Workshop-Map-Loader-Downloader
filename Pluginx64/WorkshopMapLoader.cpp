@@ -58,6 +58,14 @@ namespace
 
 void Pluginx64::onLoad()
 {
+	// BakkesMod decodes PNG/JPG images with DirectXTex, which creates its WIC factory with CoCreateInstance on
+	// whichever thread loads the image. That thread usually has no COM apartment, so the call only succeeds if
+	// the process has a multithreaded apartment to fall back on. Windows always has one; Wine/Proton often does
+	// not, and every image then fails with "Load texture at failed! Result -2147467262" (E_NOINTERFACE).
+	// Holding an MTA usage reference keeps that implicit MTA alive while the plugin is loaded.
+	if (FAILED(CoIncrementMTAUsage(&m_mtaUsageCookie)))
+		m_mtaUsageCookie = nullptr;
+
 	_globalCvarManager = cvarManager;
 	_globalGameWrapper = gameWrapper;
 
@@ -867,4 +875,10 @@ std::vector<std::string> Pluginx64::GetDrives()
 void Pluginx64::onUnload()
 {
 	m_bakkesPluginsMapInstaller.Shutdown();
+
+	if (m_mtaUsageCookie)
+	{
+		CoDecrementMTAUsage(m_mtaUsageCookie);
+		m_mtaUsageCookie = nullptr;
+	}
 }
