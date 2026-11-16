@@ -364,3 +364,6 @@ FodyWeavers.xsd
 plugins/WorkshopMapLoader.dll
 plugins/WorkshopMapLoader.exp
 plugins/WorkshopMapLoader.lib
+# Linux clang-cl build (build-clang-cl.sh)
+build/
+build.log

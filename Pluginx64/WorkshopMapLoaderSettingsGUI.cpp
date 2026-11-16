@@ -21,7 +21,7 @@ void Pluginx64::RenderSettings()
 	ImGui::SetNextWindowPos(ImVec2(ImGui::GetWindowWidth() / 2, ImGui::GetWindowHeight() / 2), ImGuiCond_Appearing, ImVec2(0.5f, 0.5f));
 	if (ImGui::BeginPopupModal("BindSet", NULL, ImGuiWindowFlags_AlwaysAutoResize))
 	{
-		ImGui::Text("Open plugin window : %s", std::string(KeyBindInputBuf));
+		ImGui::Text("Open plugin window : %s", KeyBindInputBuf);
 		ImGui::NewLine();
 
 		if (ImGui::Button("OK", ImVec2(100.f, 25.f))) { ImGui::CloseCurrentPopup(); }
