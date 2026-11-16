@@ -324,6 +324,29 @@ namespace
 		return TrimString(p_value);
 	}
 
+	// Finds the first attribute-less <span> whose text ends with p_suffix (e.g. "<span>90.6K views</span>")
+	// and returns the text without the suffix. BakkesPlugins shows a map's view/download counts this way.
+	std::string ExtractCountSpan(const std::string& p_html, const std::string& p_suffix)
+	{
+		std::string lowerSuffix = ToLowerString(p_suffix);
+		size_t position = 0;
+		while ((position = p_html.find("<span>", position)) != std::string::npos)
+		{
+			size_t textBegin = position + 6;
+			size_t textEnd = p_html.find("</span>", textBegin);
+			if (textEnd == std::string::npos)
+				break;
+
+			std::string text = CleanHTMLText(p_html.substr(textBegin, textEnd - textBegin));
+			std::string lowerText = ToLowerString(text);
+			if (lowerText.size() > lowerSuffix.size() && lowerText.compare(lowerText.size() - lowerSuffix.size(), lowerSuffix.size(), lowerSuffix) == 0)
+				return RemoveSuffix(text, p_suffix);
+
+			position = textEnd + 7;
+		}
+		return "";
+	}
+
 	bool IsValidBakkesPluginsDownloadURL(const std::string& p_url)
 	{
 		std::string lowerURL = ToLowerString(p_url);
@@ -897,7 +920,11 @@ bool BakkesPluginsMapInstaller::ParseMapHTML(const std::string& p_detailsHTML, c
 	p_mapInfo.m_publishedDate = ExtractDefinitionValue(p_detailsHTML, "Created");
 	p_mapInfo.m_lastUpdatedDate = ExtractDefinitionValue(p_detailsHTML, "Last Updated");
 	p_mapInfo.m_views = ExtractDefinitionValue(p_detailsHTML, "Views");
+	if (p_mapInfo.m_views.empty())
+		p_mapInfo.m_views = ExtractCountSpan(p_detailsHTML, "views");
 	p_mapInfo.m_downloads = ExtractDefinitionValue(p_detailsHTML, "Downloads");
+	if (p_mapInfo.m_downloads.empty())
+		p_mapInfo.m_downloads = ExtractCountSpan(p_detailsHTML, "downloads");
 
 	size_t navigation = p_versionsHTML.find("<nav aria-label=\"Map detail tabs\"");
 	size_t versionsEnd = navigation == std::string::npos ? std::string::npos : p_versionsHTML.find("</section>", navigation);
