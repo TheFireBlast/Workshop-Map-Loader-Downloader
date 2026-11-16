@@ -275,26 +275,33 @@ namespace
 		return CleanHTMLText(p_html.substr(contentBegin + 1, contentEnd - contentBegin - 1));
 	}
 
-	std::vector<std::string> ExtractSpanValues(const std::string& p_html, const std::string& p_class)
+	// Collects the text of every <p_tagName class="p_class"> element in p_html.
+	std::vector<std::string> ExtractTagValues(const std::string& p_html, const std::string& p_tagName, const std::string& p_class)
 	{
 		std::vector<std::string> values;
 		std::string classMarker = "class=\"" + p_class + "\"";
+		std::string openMarker = "<" + p_tagName;
+		std::string closeMarker = "</" + p_tagName + ">";
 		size_t position = 0;
-		while ((position = p_html.find("<span", position)) != std::string::npos)
+		while ((position = p_html.find(openMarker, position)) != std::string::npos)
 		{
 			size_t tagEnd = p_html.find('>', position);
 			if (tagEnd == std::string::npos)
 				break;
 
+			// Skip tags that only share a prefix (e.g. <spanner> when looking for <span>)
+			char next = p_html[position + openMarker.size()];
+			bool exactTag = next == ' ' || next == '>' || next == '\t' || next == '\n' || next == '\r';
+
 			std::string tag = p_html.substr(position, tagEnd - position + 1);
-			if (tag.find(classMarker) != std::string::npos)
+			if (exactTag && tag.find(classMarker) != std::string::npos)
 			{
-				size_t spanEnd = p_html.find("</span>", tagEnd);
-				if (spanEnd == std::string::npos)
+				size_t elementEnd = p_html.find(closeMarker, tagEnd);
+				if (elementEnd == std::string::npos)
 					break;
 
-				values.push_back(CleanHTMLText(p_html.substr(tagEnd + 1, spanEnd - tagEnd - 1)));
-				position = spanEnd + 7;
+				values.push_back(CleanHTMLText(p_html.substr(tagEnd + 1, elementEnd - tagEnd - 1)));
+				position = elementEnd + closeMarker.size();
 			}
 			else
 			{
@@ -302,6 +309,11 @@ namespace
 			}
 		}
 		return values;
+	}
+
+	std::vector<std::string> ExtractSpanValues(const std::string& p_html, const std::string& p_class)
+	{
+		return ExtractTagValues(p_html, "span", p_class);
 	}
 
 	std::string RemoveSuffix(std::string p_value, const std::string& p_suffix)
@@ -904,7 +916,10 @@ bool BakkesPluginsMapInstaller::ParseMapHTML(const std::string& p_detailsHTML, c
 
 		std::string article = p_versionsHTML.substr(articlePosition, articleEnd - articlePosition + 10);
 		std::vector<std::string> versionValues = ExtractSpanValues(article, "text-lg font-semibold text-gray-900");
-		std::vector<std::string> dateValues = ExtractSpanValues(article, "text-sm text-gray-500");
+		// BakkesPlugins renders the release date as <time class="text-sm text-gray-500">; older pages used a <span>
+		std::vector<std::string> dateValues = ExtractTagValues(article, "time", "text-sm text-gray-500");
+		if (dateValues.empty())
+			dateValues = ExtractSpanValues(article, "text-sm text-gray-500");
 		std::vector<std::string> detailValues = ExtractSpanValues(article, "inline-flex items-center gap-1");
 
 		size_t downloadPosition = article.find("href=\"https://cdn.bakkesplugins.com/");
