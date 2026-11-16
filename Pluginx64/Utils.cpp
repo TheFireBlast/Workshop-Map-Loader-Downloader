@@ -1,4 +1,5 @@
 #include "pch.h"
+#include <zlib.h>
 
 namespace Utils
 {
@@ -49,10 +50,276 @@ namespace Utils
 		return !error && std::filesystem::exists(p_status);
 	}
 
+	// ---- Built-in ZIP extraction (zlib) ----
+	// Replaces shelling out to PowerShell / cmd + VBScript, which flashes a console window and does not work
+	// under Wine/Proton (no PowerShell, no Shell.Application zip folders).
+	// Supports stored and deflated entries, ZIP64 sizes/offsets, and rejects entries that would escape p_destination.
+	namespace
+	{
+		uint16_t ReadU16(const unsigned char* p_data) { return static_cast<uint16_t>(p_data[0] | (p_data[1] << 8)); }
+		uint32_t ReadU32(const unsigned char* p_data) { return static_cast<uint32_t>(ReadU16(p_data)) | (static_cast<uint32_t>(ReadU16(p_data + 2)) << 16); }
+		uint64_t ReadU64(const unsigned char* p_data) { return static_cast<uint64_t>(ReadU32(p_data)) | (static_cast<uint64_t>(ReadU32(p_data + 4)) << 32); }
+
+		struct ZipEntry
+		{
+			std::string name;
+			uint16_t method = 0;
+			uint64_t compressedSize = 0;
+			uint64_t uncompressedSize = 0;
+			uint64_t localHeaderOffset = 0;
+			bool utf8 = false;
+		};
+
+		bool ReadAt(std::ifstream& p_file, uint64_t p_offset, void* p_buffer, size_t p_size)
+		{
+			p_file.clear();
+			p_file.seekg(static_cast<std::streamoff>(p_offset), std::ios::beg);
+			p_file.read(static_cast<char*>(p_buffer), static_cast<std::streamsize>(p_size));
+			return static_cast<size_t>(p_file.gcount()) == p_size;
+		}
+
+		std::filesystem::path SafeEntryPath(const std::filesystem::path& p_destination, const ZipEntry& p_entry)
+		{
+			std::string name = p_entry.name;
+			std::replace(name.begin(), name.end(), '\\', '/');
+			std::filesystem::path relative = p_entry.utf8 ? std::filesystem::u8path(name) : std::filesystem::path(name);
+			relative = relative.lexically_normal();
+			if (relative.empty() || relative.is_absolute() || relative.has_root_name() || relative.has_root_directory())
+				return {};
+			for (const auto& part : relative)
+				if (part == "..")
+					return {};
+			return p_destination / relative;
+		}
+	}
+
+	bool ExtractZip(const std::filesystem::path& p_zipPath, const std::filesystem::path& p_destination, std::string& p_error)
+	{
+		std::ifstream file(p_zipPath, std::ios::binary);
+		if (!file)
+		{
+			p_error = "cannot open " + p_zipPath.string();
+			return false;
+		}
+		file.seekg(0, std::ios::end);
+		const uint64_t fileSize = static_cast<uint64_t>(file.tellg());
+
+		// Find the End Of Central Directory record (last 64 KiB + 22 bytes)
+		const uint64_t tailSize = std::min<uint64_t>(fileSize, 0xFFFF + 22);
+		std::vector<unsigned char> tail(static_cast<size_t>(tailSize));
+		if (!ReadAt(file, fileSize - tailSize, tail.data(), tail.size()))
+		{
+			p_error = "cannot read the end of the archive";
+			return false;
+		}
+		int64_t eocd = -1;
+		for (int64_t i = static_cast<int64_t>(tail.size()) - 22; i >= 0; i--)
+			if (ReadU32(&tail[static_cast<size_t>(i)]) == 0x06054b50) { eocd = i; break; }
+		if (eocd < 0)
+		{
+			p_error = "not a ZIP archive (no end of central directory)";
+			return false;
+		}
+
+		uint64_t entryCount = ReadU16(&tail[static_cast<size_t>(eocd) + 10]);
+		uint64_t directorySize = ReadU32(&tail[static_cast<size_t>(eocd) + 12]);
+		uint64_t directoryOffset = ReadU32(&tail[static_cast<size_t>(eocd) + 16]);
+
+		// ZIP64 end of central directory locator sits right before the EOCD
+		if (eocd >= 20 && ReadU32(&tail[static_cast<size_t>(eocd) - 20]) == 0x07064b50)
+		{
+			unsigned char zip64[56];
+			const uint64_t zip64Offset = ReadU64(&tail[static_cast<size_t>(eocd) - 20 + 8]);
+			if (ReadAt(file, zip64Offset, zip64, sizeof(zip64)) && ReadU32(zip64) == 0x06064b50)
+			{
+				entryCount = ReadU64(zip64 + 32);
+				directorySize = ReadU64(zip64 + 40);
+				directoryOffset = ReadU64(zip64 + 48);
+			}
+		}
+
+		if (directoryOffset + directorySize > fileSize)
+		{
+			p_error = "central directory is out of range";
+			return false;
+		}
+		std::vector<unsigned char> directory(static_cast<size_t>(directorySize));
+		if (!ReadAt(file, directoryOffset, directory.data(), directory.size()))
+		{
+			p_error = "cannot read the central directory";
+			return false;
+		}
+
+		std::vector<ZipEntry> entries;
+		size_t position = 0;
+		for (uint64_t index = 0; index < entryCount; index++)
+		{
+			if (position + 46 > directory.size() || ReadU32(&directory[position]) != 0x02014b50)
+			{
+				p_error = "corrupt central directory";
+				return false;
+			}
+			const unsigned char* header = &directory[position];
+			ZipEntry entry;
+			entry.utf8 = (ReadU16(header + 8) & 0x0800) != 0;
+			entry.method = ReadU16(header + 10);
+			entry.compressedSize = ReadU32(header + 20);
+			entry.uncompressedSize = ReadU32(header + 24);
+			const uint16_t nameLength = ReadU16(header + 28);
+			const uint16_t extraLength = ReadU16(header + 30);
+			const uint16_t commentLength = ReadU16(header + 32);
+			entry.localHeaderOffset = ReadU32(header + 42);
+			if (position + 46 + nameLength + extraLength + commentLength > directory.size())
+			{
+				p_error = "corrupt central directory entry";
+				return false;
+			}
+			entry.name.assign(reinterpret_cast<const char*>(header + 46), nameLength);
+
+			// ZIP64 extended information: only the fields saturated in the header are present, in this order
+			const unsigned char* extra = header + 46 + nameLength;
+			for (size_t e = 0; e + 4 <= extraLength;)
+			{
+				const uint16_t id = ReadU16(extra + e);
+				const uint16_t size = ReadU16(extra + e + 2);
+				if (id == 0x0001)
+				{
+					size_t field = e + 4;
+					if (entry.uncompressedSize == 0xFFFFFFFF && field + 8 <= e + 4 + size) { entry.uncompressedSize = ReadU64(extra + field); field += 8; }
+					if (entry.compressedSize == 0xFFFFFFFF && field + 8 <= e + 4 + size) { entry.compressedSize = ReadU64(extra + field); field += 8; }
+					if (entry.localHeaderOffset == 0xFFFFFFFF && field + 8 <= e + 4 + size) { entry.localHeaderOffset = ReadU64(extra + field); }
+				}
+				e += 4 + size;
+			}
+			entries.push_back(entry);
+			position += 46 + nameLength + extraLength + commentLength;
+		}
+
+		std::error_code error;
+		std::filesystem::create_directories(p_destination, error);
+		std::vector<unsigned char> input(1 << 16), output(1 << 16);
+		for (const ZipEntry& entry : entries)
+		{
+			const std::filesystem::path target = SafeEntryPath(p_destination, entry);
+			if (target.empty())
+			{
+				p_error = "unsafe path in archive: " + entry.name;
+				return false;
+			}
+			if (!entry.name.empty() && (entry.name.back() == '/' || entry.name.back() == '\\'))
+			{
+				std::filesystem::create_directories(target, error);
+				continue;
+			}
+			if (entry.method != 0 && entry.method != 8)
+			{
+				p_error = "unsupported compression method " + std::to_string(entry.method) + " for " + entry.name;
+				return false;
+			}
+
+			unsigned char local[30];
+			if (!ReadAt(file, entry.localHeaderOffset, local, sizeof(local)) || ReadU32(local) != 0x04034b50)
+			{
+				p_error = "corrupt local header for " + entry.name;
+				return false;
+			}
+			uint64_t dataOffset = entry.localHeaderOffset + 30 + ReadU16(local + 26) + ReadU16(local + 28);
+			if (dataOffset + entry.compressedSize > fileSize)
+			{
+				p_error = "entry data out of range: " + entry.name;
+				return false;
+			}
+
+			std::filesystem::create_directories(target.parent_path(), error);
+			std::ofstream out(target, std::ios::binary | std::ios::trunc);
+			if (!out)
+			{
+				p_error = "cannot create " + target.string();
+				return false;
+			}
+
+			file.clear();
+			file.seekg(static_cast<std::streamoff>(dataOffset), std::ios::beg);
+			uint64_t remaining = entry.compressedSize;
+			uint64_t written = 0;
+
+			if (entry.method == 0)
+			{
+				while (remaining > 0)
+				{
+					const size_t chunk = static_cast<size_t>(std::min<uint64_t>(remaining, input.size()));
+					file.read(reinterpret_cast<char*>(input.data()), chunk);
+					if (static_cast<size_t>(file.gcount()) != chunk)
+					{
+						p_error = "truncated data for " + entry.name;
+						return false;
+					}
+					out.write(reinterpret_cast<const char*>(input.data()), chunk);
+					remaining -= chunk;
+					written += chunk;
+				}
+			}
+			else
+			{
+				z_stream stream = {};
+				if (inflateInit2(&stream, -MAX_WBITS) != Z_OK)
+				{
+					p_error = "zlib init failed";
+					return false;
+				}
+				int status = Z_OK;
+				while (status != Z_STREAM_END)
+				{
+					if (stream.avail_in == 0)
+					{
+						if (remaining == 0)
+							break;
+						const size_t chunk = static_cast<size_t>(std::min<uint64_t>(remaining, input.size()));
+						file.read(reinterpret_cast<char*>(input.data()), chunk);
+						if (static_cast<size_t>(file.gcount()) != chunk)
+							break;
+						remaining -= chunk;
+						stream.next_in = input.data();
+						stream.avail_in = static_cast<uInt>(chunk);
+					}
+					stream.next_out = output.data();
+					stream.avail_out = static_cast<uInt>(output.size());
+					status = inflate(&stream, Z_NO_FLUSH);
+					if (status != Z_OK && status != Z_STREAM_END)
+						break;
+					const size_t produced = output.size() - stream.avail_out;
+					out.write(reinterpret_cast<const char*>(output.data()), produced);
+					written += produced;
+				}
+				inflateEnd(&stream);
+				if (status != Z_STREAM_END)
+				{
+					p_error = "corrupt deflate data for " + entry.name;
+					return false;
+				}
+			}
+
+			out.close();
+			if (!out || written != entry.uncompressedSize)
+			{
+				p_error = "size mismatch or write failure for " + entry.name;
+				return false;
+			}
+		}
+		return true;
+	}
+
 	void CreateUnzipBatchFile(const std::filesystem::path& p_bakkesmodPath, const std::string& p_destinationPath, const std::string& p_zipFilePath)
 	{
 		const std::filesystem::path batchPath = p_bakkesmodPath / "data" / "WorkshopMapLoader" / "temp" / "unzip.bat";
 		std::filesystem::create_directories(batchPath.parent_path());
+
+		std::string extractError;
+		if (ExtractZip(std::filesystem::path(p_zipFilePath), std::filesystem::path(p_destinationPath), extractError))
+			return;
+		if (_globalCvarManager)
+			_globalCvarManager->log("Built-in unzip failed (" + extractError + "), falling back to the batch script");
+
 		std::ofstream batchFile(batchPath);
 		std::string destinationPath = p_destinationPath;
 		std::string zipFilePath = p_zipFilePath;
@@ -72,6 +339,45 @@ namespace Utils
 		batchFile << "cscript //nologo %vbs%\nif exist %vbs% del /f /q %vbs%\n";
 		batchFile.close();
 		system(batchPath.string().c_str());
+	}
+
+	void AddImageCover(ImDrawList* p_drawList, ImageWrapper& p_image, const ImVec2& p_min, const ImVec2& p_max)
+	{
+		ImTextureID texture = p_image.GetImGuiTex();
+		if (!texture)
+			return;
+
+		ImVec2 uv0(0.f, 0.f), uv1(1.f, 1.f);
+		const Vector2 imageSize = p_image.GetSize();
+		const float boxWidth = p_max.x - p_min.x;
+		const float boxHeight = p_max.y - p_min.y;
+		if (imageSize.X > 0 && imageSize.Y > 0 && boxWidth > 0.f && boxHeight > 0.f)
+		{
+			const float imageAspect = static_cast<float>(imageSize.X) / static_cast<float>(imageSize.Y);
+			const float boxAspect = boxWidth / boxHeight;
+			if (imageAspect > boxAspect)
+			{
+				const float visible = boxAspect / imageAspect; // fraction of the width that fits
+				uv0.x = (1.f - visible) * 0.5f;
+				uv1.x = 1.f - uv0.x;
+			}
+			else
+			{
+				const float visible = imageAspect / boxAspect; // fraction of the height that fits
+				uv0.y = (1.f - visible) * 0.5f;
+				uv1.y = 1.f - uv0.y;
+			}
+		}
+		p_drawList->AddImage(texture, p_min, p_max, uv0, uv1);
+	}
+
+	ImVec2 FitImageSize(ImageWrapper& p_image, const ImVec2& p_box)
+	{
+		const Vector2 imageSize = p_image.GetSize();
+		if (imageSize.X <= 0 || imageSize.Y <= 0 || p_box.x <= 0.f || p_box.y <= 0.f)
+			return p_box;
+		const float scale = (std::min)(p_box.x / static_cast<float>(imageSize.X), p_box.y / static_cast<float>(imageSize.Y));
+		return ImVec2(imageSize.X * scale, imageSize.Y * scale);
 	}
 
 	void RenderProgressBar(float p_value, float p_maxValue, ImVec2 p_position, ImVec2 p_size, ImColor p_backgroundColor, ImColor p_progressColor,

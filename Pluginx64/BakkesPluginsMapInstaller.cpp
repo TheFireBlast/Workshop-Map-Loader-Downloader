@@ -776,7 +776,10 @@ void BakkesPluginsMapInstaller::Render()
 	if(m_previewImage && m_previewImage->GetImGuiTex())
 	{
 		const ImVec2 availableImageSize = ImGui::GetContentRegionAvail();
-		ImGui::Image(m_previewImage->GetImGuiTex(), availableImageSize);
+		const ImVec2 fittedSize = Utils::FitImageSize(*m_previewImage, availableImageSize);
+		const ImVec2 cursor = ImGui::GetCursorPos();
+		ImGui::SetCursorPos(ImVec2(cursor.x + (availableImageSize.x - fittedSize.x) * 0.5f, cursor.y + (availableImageSize.y - fittedSize.y) * 0.5f));
+		ImGui::Image(m_previewImage->GetImGuiTex(), fittedSize);
 	}
 	else
 	{
@@ -1244,14 +1247,21 @@ void BakkesPluginsMapInstaller::InstallMap(BakkesPluginsMapInfo p_mapInfo, Bakke
 			m_state = InstallMapState::Installing;
 		}
 
-		if (g_pluginConfig.UnzipMethod == "Bat")
-			Utils::CreateUnzipBatchFile(g_pluginConfig.BakkesmodPath, stagePath.string(), zipPath.string());
-		else
+		// Extract in-process; the external methods are only a fallback (they open a console window and do not
+		// work under Wine/Proton).
+		std::string extractError;
+		if (!Utils::ExtractZip(zipPath, stagePath, extractError))
 		{
-			std::string extractCommand = "powershell.exe -NoProfile -Command \"Expand-Archive -LiteralPath '" +
-				EscapePowerShellLiteral(zipPath.string()) + "' -DestinationPath '" + EscapePowerShellLiteral(stagePath.string()) + "' -Force\"";
-			if (system(extractCommand.c_str()) != 0)
-				throw std::runtime_error("PowerShell failed to extract the downloaded ZIP.");
+			m_cvarManager->log("Built-in unzip failed (" + extractError + "), falling back to " + g_pluginConfig.UnzipMethod);
+			if (g_pluginConfig.UnzipMethod == "Bat")
+				Utils::CreateUnzipBatchFile(g_pluginConfig.BakkesmodPath, stagePath.string(), zipPath.string());
+			else
+			{
+				std::string extractCommand = "powershell.exe -NoProfile -Command \"Expand-Archive -LiteralPath '" +
+					EscapePowerShellLiteral(zipPath.string()) + "' -DestinationPath '" + EscapePowerShellLiteral(stagePath.string()) + "' -Force\"";
+				if (system(extractCommand.c_str()) != 0)
+					throw std::runtime_error("PowerShell failed to extract the downloaded ZIP.");
+			}
 		}
 
 		for (int attempt = 0; attempt < 30 && !FindMapFile(stagePath).has_value(); attempt++)

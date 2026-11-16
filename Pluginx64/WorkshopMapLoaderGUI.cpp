@@ -453,7 +453,7 @@ void Pluginx64::renderMaps()
 						{
 							if (curMap.PreviewImage->GetImGuiTex())
 							{
-								draw_list->AddImage(curMap.PreviewImage->GetImGuiTex(), ImageMin, ImageMax); //Map image preview
+								Utils::AddImageCover(draw_list, *curMap.PreviewImage, ImageMin, ImageMax); //Map image preview
 							}
 						}
 					}
@@ -576,7 +576,7 @@ void Pluginx64::renderMaps_DisplayMode_0(Map map)
 				{
 					if (map.PreviewImage->GetImGuiTex())
 					{
-						draw_list->AddImage(map.PreviewImage->GetImGuiTex(), ImageMin, ImageMax); //Map image preview
+						Utils::AddImageCover(draw_list, *map.PreviewImage, ImageMin, ImageMax); //Map image preview
 					}
 				}
 			}
@@ -661,7 +661,7 @@ void Pluginx64::renderMaps_DisplayMode_1(Map map, float buttonWidth)
 				{
 					if (map.PreviewImage->GetImGuiTex())
 					{
-						draw_list->AddImage(map.PreviewImage->GetImGuiTex(), ImageMin, ImageMax); //Map image preview
+						Utils::AddImageCover(draw_list, *map.PreviewImage, ImageMin, ImageMax); //Map image preview
 					}
 				}
 			}
