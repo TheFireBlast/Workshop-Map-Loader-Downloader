@@ -466,15 +466,21 @@ namespace
 		return true;
 	}
 
-	bool DownloadPreviewFile(const std::string& p_url, const std::filesystem::path& p_destination, std::atomic<bool>& p_cancelRequested)
+	bool DownloadPreviewFile(const std::string& p_url, const std::filesystem::path& p_destination, std::atomic<bool>& p_cancelRequested, std::string& p_error)
 	{
 		std::ofstream output(p_destination, std::ios::binary);
 		if(!output)
+		{
+			p_error = "unable to create " + p_destination.string();
 			return false;
+		}
 
 		CURL* curl = curl_easy_init();
 		if(!curl)
+		{
+			p_error = "unable to initialize curl";
 			return false;
+		}
 
 		char errorBuffer[CURL_ERROR_SIZE] = {};
 		ConfigureCurlRequest(curl, p_url, errorBuffer);
@@ -491,10 +497,22 @@ namespace
 		curl_easy_cleanup(curl);
 		output.close();
 
-		if(result != CURLE_OK || responseCode < 200 || responseCode >= 300 || !std::filesystem::exists(p_destination))
+		if(result != CURLE_OK)
+		{
+			p_error = std::string(errorBuffer[0] ? errorBuffer : curl_easy_strerror(result)) + " (curl " + std::to_string(result) + ")";
 			return false;
-
-		return std::filesystem::file_size(p_destination) > 0;
+		}
+		if(responseCode < 200 || responseCode >= 300)
+		{
+			p_error = "HTTP " + std::to_string(responseCode);
+			return false;
+		}
+		if(!std::filesystem::exists(p_destination) || std::filesystem::file_size(p_destination) == 0)
+		{
+			p_error = "downloaded file is empty";
+			return false;
+		}
+		return true;
 	}
 
 	bool DownloadFile(const std::string& p_url, const std::filesystem::path& p_destination, BakkesPluginsMapInstaller* p_installer, std::string& p_error)
@@ -1063,11 +1081,16 @@ void BakkesPluginsMapInstaller::FetchMapInfo(std::string p_mapID, std::string p_
 	try
 	{
 		std::filesystem::create_directories(previewDirectory);
-		if(DownloadPreviewFile(mapInfo.m_previewUrl, previewPath, m_cancelRequested))
+		std::string previewError;
+		if(DownloadPreviewFile(mapInfo.m_previewUrl, previewPath, m_cancelRequested, previewError))
 		{
 			std::lock_guard<std::mutex> lock(m_mutex);
 			m_previewCachePath = previewPath;
 			m_previewReady = true;
+		}
+		else if(!m_cancelRequested)
+		{
+			m_cvarManager->log("Unable to download the BakkesPlugins preview " + mapInfo.m_previewUrl + ": " + previewError);
 		}
 	}
 	catch(const std::exception& p_exception)
