@@ -9,8 +9,6 @@ namespace fs = std::filesystem;
 float heightMutators = 35.f;
 float heightCustomGamePopup = 194.f;
 
-float windowSizeXBefore = ImGui::GetWindowSize().x;
-float windowSizeYBefore = ImGui::GetWindowSize().y;
 
 
 void Pluginx64::Render()

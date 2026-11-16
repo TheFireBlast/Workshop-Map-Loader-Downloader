@@ -57,7 +57,7 @@ printf '%s\n' "${SOURCES[@]}" | CFLAGS_DECL="$(declare -p CFLAGS)" \
   xargs -P "$JOBS" -I{} bash -c 'eval "$CFLAGS_DECL"; compile "$1"' _ {}
 
 echo "link"
-lld-link /nologo /DLL /MACHINE:X64 /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF \
+lld-link /nologo /DLL "/MAP:$ROOT/build/WorkshopMapLoader.map" /DEBUG "/PDB:$ROOT/build/WorkshopMapLoader.pdb" /MACHINE:X64 /SUBSYSTEM:WINDOWS /OPT:REF /OPT:ICF \
   "/OUT:$OUT/WorkshopMapLoader.dll" \
   "/LIBPATH:$XWIN/crt/lib/x86_64" "/LIBPATH:$XWIN/sdk/lib/um/x86_64" "/LIBPATH:$XWIN/sdk/lib/ucrt/x86_64" \
   "/LIBPATH:$SRC/LibrariesUsed/lib" "/LIBPATH:$BAKKESMOD_SDK/lib" \
